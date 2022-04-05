@@ -17,6 +17,44 @@ namespace Lua {
 
 constexpr char GLOBAL_SCRIPT_NAME[] = "GLOBAL";
 
+constexpr absl::string_view CustomStatNamespace = "wasmcustom";
+
+//KS: klasa przygotowana pod globalny stan
+class Metrics {
+public:
+  Metrics(Stats::ScopeSharedPtr scope):
+    scope_(scope), stat_name_pool_(scope_->symbolTable()),
+    custom_stat_namespace_(stat_name_pool_.add(CustomStatNamespace)) {
+  }
+
+  const absl::flat_hash_map<int, Stats::Counter*> counters;
+  int currentId;
+  Stats::ScopeSharedPtr scope_;
+  Stats::StatNamePool stat_name_pool_;
+  const Stats::StatName custom_stat_namespace_;
+  static ExportedFunctions exportedFunctions() {
+    return {
+        {"countMetric", static_counterMetric},
+        ("incrementMetric", static_incrementMetric};
+  }
+
+//KS: funkcje które będą dostępne w skryptach LUA, trzeba je jeszcze zarejestrować
+private:
+  /**
+   * Increment given metric
+   * @param 1 (int32): id of the metric
+   */
+  DECLARE_LUA_FUNCTION(Metrics, incrementMetric);
+  /**
+   * Create counter metric
+   * @param 1 (string): the name of the metric
+   * @return metric id (int32)
+   */
+  DECLARE_LUA_FUNCTION(Metrics, counterMetric);
+};
+
+using MetricsPtr = std::unique_ptr<Metrics>;
+
 class PerLuaCodeSetup : Logger::Loggable<Logger::Id::lua> {
 public:
   PerLuaCodeSetup(const std::string& lua_code, ThreadLocal::SlotAllocator& tls);
@@ -350,7 +388,7 @@ class FilterConfig : Logger::Loggable<Logger::Id::lua> {
 public:
   FilterConfig(const envoy::extensions::filters::http::lua::v3::Lua& proto_config,
                ThreadLocal::SlotAllocator& tls, Upstream::ClusterManager& cluster_manager,
-               Api::Api& api);
+               Api::Api& api, const Stats::ScopeSharedPtr& scope);
 
   PerLuaCodeSetup* perLuaCodeSetup(const std::string& name) const {
     const auto iter = per_lua_code_setups_map_.find(name);
@@ -361,7 +399,7 @@ public:
   }
 
   Upstream::ClusterManager& cluster_manager_;
-
+  MetricsSharedPtr metrics_;
 private:
   absl::flat_hash_map<std::string, PerLuaCodeSetupPtr> per_lua_code_setups_map_;
 };

@@ -133,6 +133,8 @@ PerLuaCodeSetup::PerLuaCodeSetup(const std::string& lua_code, ThreadLocal::SlotA
   lua_state_.registerType<DynamicMetadataMapIterator>();
   lua_state_.registerType<StreamHandleWrapper>();
   lua_state_.registerType<PublicKeyWrapper>();
+  //KS: rejestracja stworzonych funckji w LUA
+  lua_state_.registerType<Metrics>();
 
   const Filters::Common::Lua::InitializerList initializers(
       // EnvoyTimestampResolution "enum".
@@ -646,18 +648,39 @@ int StreamHandleWrapper::luaTimestamp(lua_State* state) {
   return 1;
 }
 
+//KS: zwiekszanie metryki
+int Metrics::incrementMetric(lua_State* state) {
+  int id = luaL_checknumber(state, 2);
+  Stats::Counter* counter = counters[id];
+  counter->inc();
+  return 0
+}
+
+//KS: definiowanie metryki
+int Metrics::countMetric(lua_State* state) {
+  absl::string_view metric_name = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
+  Stats::StatNameManagedStorage storage(metric_name, scope_->symbolTable());
+  Stats::StatName stat_name = storage.statName();
+  int id = currentId++;
+  Stats::Counter* c = &Stats::Utility::counterFromElements(*scope_, {custom_stat_namespace_, stat_name});
+  counters[id] = c
+  lua_pushnumber(state, id);
+  return 0;
+}
+
 FilterConfig::FilterConfig(const envoy::extensions::filters::http::lua::v3::Lua& proto_config,
                            ThreadLocal::SlotAllocator& tls,
-                           Upstream::ClusterManager& cluster_manager, Api::Api& api)
-    : cluster_manager_(cluster_manager) {
-  auto global_setup_ptr = std::make_unique<PerLuaCodeSetup>(proto_config.inline_code(), tls);
+                           Upstream::ClusterManager& cluster_manager, Api::Api& api,
+                           const Stats::ScopeSharedPtr& scope)
+    : cluster_manager_(cluster_manager), metrics_(std::make_unique<Metrics>(scope)) {
+  auto global_setup_ptr = std::make_unique<PerLuaCodeSetup>(proto_config.inline_code(), tls, metrics_);
   if (global_setup_ptr) {
     per_lua_code_setups_map_[GLOBAL_SCRIPT_NAME] = std::move(global_setup_ptr);
   }
 
   for (const auto& source : proto_config.source_codes()) {
     const std::string code = Config::DataSource::read(source.second, true, api);
-    auto per_lua_code_setup_ptr = std::make_unique<PerLuaCodeSetup>(code, tls);
+    auto per_lua_code_setup_ptr = std::make_unique<PerLuaCodeSetup>(code, tls, metrics_);
     if (!per_lua_code_setup_ptr) {
       continue;
     }
