@@ -119,6 +119,9 @@ Http::AsyncClient::Request* makeHttpCall(lua_State* state, Filter& filter,
 
 } // namespace
 
+
+MetricsDataPtr MetricsData::singleton_ = nullptr;
+
 PerLuaCodeSetup::PerLuaCodeSetup(const std::string& lua_code, ThreadLocal::SlotAllocator& tls)
     : lua_state_(lua_code, tls) {
   lua_state_.registerType<Filters::Common::Lua::BufferWrapper>();
@@ -133,7 +136,6 @@ PerLuaCodeSetup::PerLuaCodeSetup(const std::string& lua_code, ThreadLocal::SlotA
   lua_state_.registerType<DynamicMetadataMapIterator>();
   lua_state_.registerType<StreamHandleWrapper>();
   lua_state_.registerType<PublicKeyWrapper>();
-  //KS: rejestracja stworzonych funckji w LUA
   lua_state_.registerType<Metrics>();
 
   const Filters::Common::Lua::InitializerList initializers(
@@ -522,6 +524,17 @@ int StreamHandleWrapper::luaConnection(lua_State* state) {
   return 1;
 }
 
+int StreamHandleWrapper::luaMetrics(lua_State* state) {
+  ASSERT(state_ == State::Running);
+  if (metrics_.get() != nullptr) {
+    metrics_.pushStack();
+  } else {
+    metrics_.reset(
+        Metrics::create(state), true);
+  }
+  return 1;
+}
+
 int StreamHandleWrapper::luaLogTrace(lua_State* state) {
   absl::string_view message = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
   filter_.scriptLog(spdlog::level::trace, message);
@@ -651,36 +664,37 @@ int StreamHandleWrapper::luaTimestamp(lua_State* state) {
 //KS: zwiekszanie metryki
 int Metrics::incrementMetric(lua_State* state) {
   int id = luaL_checknumber(state, 2);
-  Stats::Counter* counter = counters[id];
+  Stats::Counter* counter = metricsData->counters[id];
   counter->inc();
-  return 0
+  return 0;
 }
 
 //KS: definiowanie metryki
-int Metrics::countMetric(lua_State* state) {
+int Metrics::counterMetric(lua_State* state) {
   absl::string_view metric_name = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
-  Stats::StatNameManagedStorage storage(metric_name, scope_->symbolTable());
+  ENVOY_LOG(debug, "ks -> {}", metric_name);
+  Stats::StatNameManagedStorage storage(metric_name, metricsData->scope_->symbolTable());
   Stats::StatName stat_name = storage.statName();
-  int id = currentId++;
-  Stats::Counter* c = &Stats::Utility::counterFromElements(*scope_, {custom_stat_namespace_, stat_name});
-  counters[id] = c
+  int id = metricsData->currentId++;
+  Stats::Counter* c = &Stats::Utility::counterFromElements(*metricsData->scope_, {metricsData->custom_stat_namespace_, stat_name});
+  metricsData->counters[id] = c;
   lua_pushnumber(state, id);
-  return 0;
+  return 1;
 }
 
 FilterConfig::FilterConfig(const envoy::extensions::filters::http::lua::v3::Lua& proto_config,
                            ThreadLocal::SlotAllocator& tls,
-                           Upstream::ClusterManager& cluster_manager, Api::Api& api,
-                           const Stats::ScopeSharedPtr& scope)
-    : cluster_manager_(cluster_manager), metrics_(std::make_unique<Metrics>(scope)) {
-  auto global_setup_ptr = std::make_unique<PerLuaCodeSetup>(proto_config.inline_code(), tls, metrics_);
+                           Upstream::ClusterManager& cluster_manager, Api::Api& api, Stats::ScopeSharedPtr scope)
+    : cluster_manager_(cluster_manager) {
+  MetricsData::init(scope);
+  auto global_setup_ptr = std::make_unique<PerLuaCodeSetup>(proto_config.inline_code(), tls);
   if (global_setup_ptr) {
     per_lua_code_setups_map_[GLOBAL_SCRIPT_NAME] = std::move(global_setup_ptr);
   }
 
   for (const auto& source : proto_config.source_codes()) {
     const std::string code = Config::DataSource::read(source.second, true, api);
-    auto per_lua_code_setup_ptr = std::make_unique<PerLuaCodeSetup>(code, tls, metrics_);
+    auto per_lua_code_setup_ptr = std::make_unique<PerLuaCodeSetup>(code, tls);
     if (!per_lua_code_setup_ptr) {
       continue;
     }

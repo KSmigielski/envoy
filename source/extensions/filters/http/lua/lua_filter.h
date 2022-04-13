@@ -3,12 +3,14 @@
 #include "envoy/extensions/filters/http/lua/v3/lua.pb.h"
 #include "envoy/http/filter.h"
 #include "envoy/upstream/cluster_manager.h"
+#include "envoy/stats/scope.h"
 
 #include "source/common/crypto/utility.h"
 #include "source/common/http/utility.h"
 #include "source/extensions/filters/common/lua/wrappers.h"
 #include "source/extensions/filters/http/common/factory_base.h"
 #include "source/extensions/filters/http/lua/wrappers.h"
+#include <memory>
 
 namespace Envoy {
 namespace Extensions {
@@ -17,25 +19,49 @@ namespace Lua {
 
 constexpr char GLOBAL_SCRIPT_NAME[] = "GLOBAL";
 
-constexpr absl::string_view CustomStatNamespace = "wasmcustom";
+constexpr absl::string_view CustomStatNamespace = "luacustom";
 
-//KS: klasa przygotowana pod globalny stan
-class Metrics {
+class MetricsData;
+
+using MetricsDataPtr = std::shared_ptr<MetricsData>;
+
+class MetricsData {
 public:
-  Metrics(Stats::ScopeSharedPtr scope):
-    scope_(scope), stat_name_pool_(scope_->symbolTable()),
-    custom_stat_namespace_(stat_name_pool_.add(CustomStatNamespace)) {
-  }
-
-  const absl::flat_hash_map<int, Stats::Counter*> counters;
+  absl::flat_hash_map<int, Stats::Counter*> counters;
   int currentId;
   Stats::ScopeSharedPtr scope_;
   Stats::StatNamePool stat_name_pool_;
-  const Stats::StatName custom_stat_namespace_;
+  Stats::StatName custom_stat_namespace_;
+
+  static void init(Stats::ScopeSharedPtr scope) {
+    if (singleton_ == nullptr) {
+      singleton_ = std::make_shared<MetricsData>(scope);
+    }
+  }
+  static MetricsDataPtr get() {
+    return singleton_;
+  }
+
+protected:
+  static MetricsDataPtr singleton_;
+public:  
+  MetricsData(Stats::ScopeSharedPtr scope):
+    scope_(scope), stat_name_pool_(scope_->symbolTable()),
+    custom_stat_namespace_(stat_name_pool_.add(CustomStatNamespace)) {
+  }
+};
+
+class Metrics : public Filters::Common::Lua::BaseLuaObject<Metrics> {
+public:
+
+  Metrics(): metricsData(MetricsData::get()) {
+  }
+
+  MetricsDataPtr metricsData;
   static ExportedFunctions exportedFunctions() {
     return {
-        {"countMetric", static_counterMetric},
-        ("incrementMetric", static_incrementMetric};
+        {"counterMetric", static_counterMetric},
+        {"incrementMetric", static_incrementMetric}};
   }
 
 //KS: funkcje które będą dostępne w skryptach LUA, trzeba je jeszcze zarejestrować
@@ -52,8 +78,6 @@ private:
    */
   DECLARE_LUA_FUNCTION(Metrics, counterMetric);
 };
-
-using MetricsPtr = std::unique_ptr<Metrics>;
 
 class PerLuaCodeSetup : Logger::Loggable<Logger::Id::lua> {
 public:
@@ -204,7 +228,8 @@ public:
             {"importPublicKey", static_luaImportPublicKey},
             {"verifySignature", static_luaVerifySignature},
             {"base64Escape", static_luaBase64Escape},
-            {"timestamp", static_luaTimestamp}};
+            {"timestamp", static_luaTimestamp},
+            {"metrics", static_luaMetrics}};
   }
 
 private:
@@ -269,7 +294,10 @@ private:
    * @return a handle to the network connection.
    */
   DECLARE_LUA_FUNCTION(StreamHandleWrapper, luaConnection);
-
+  /**
+   * @return a handle to the metrics.
+   */
+  DECLARE_LUA_FUNCTION(StreamHandleWrapper, luaMetrics);
   /**
    * Log a message to the Envoy log.
    * @param 1 (string): The log message.
@@ -338,6 +366,7 @@ private:
     stream_info_wrapper_.reset();
     connection_wrapper_.reset();
     public_key_wrapper_.reset();
+    metrics_.reset();
   }
 
   // Http::AsyncClient::Callbacks
@@ -361,6 +390,7 @@ private:
   Filters::Common::Lua::LuaDeathRef<StreamInfoWrapper> stream_info_wrapper_;
   Filters::Common::Lua::LuaDeathRef<Filters::Common::Lua::ConnectionWrapper> connection_wrapper_;
   Filters::Common::Lua::LuaDeathRef<PublicKeyWrapper> public_key_wrapper_;
+  Filters::Common::Lua::LuaDeathRef<Metrics> metrics_;
   State state_{State::Running};
   std::function<void()> yield_callback_;
   Http::AsyncClient::Request* http_request_{};
@@ -388,7 +418,7 @@ class FilterConfig : Logger::Loggable<Logger::Id::lua> {
 public:
   FilterConfig(const envoy::extensions::filters::http::lua::v3::Lua& proto_config,
                ThreadLocal::SlotAllocator& tls, Upstream::ClusterManager& cluster_manager,
-               Api::Api& api, const Stats::ScopeSharedPtr& scope);
+               Api::Api& api, Stats::ScopeSharedPtr scope);
 
   PerLuaCodeSetup* perLuaCodeSetup(const std::string& name) const {
     const auto iter = per_lua_code_setups_map_.find(name);
@@ -397,9 +427,8 @@ public:
     }
     return nullptr;
   }
-
+  Stats::ScopeSharedPtr scope_;
   Upstream::ClusterManager& cluster_manager_;
-  MetricsSharedPtr metrics_;
 private:
   absl::flat_hash_map<std::string, PerLuaCodeSetupPtr> per_lua_code_setups_map_;
 };
