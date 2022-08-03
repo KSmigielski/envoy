@@ -10,7 +10,9 @@
 #include "source/extensions/filters/common/lua/wrappers.h"
 #include "source/extensions/filters/http/common/factory_base.h"
 #include "source/extensions/filters/http/lua/wrappers.h"
+#include <cstdint>
 #include <memory>
+#include <mutex>
 
 namespace Envoy {
 namespace Extensions {
@@ -20,64 +22,6 @@ namespace Lua {
 constexpr char GLOBAL_SCRIPT_NAME[] = "GLOBAL";
 
 constexpr absl::string_view CustomStatNamespace = "luacustom";
-
-class MetricsData;
-
-using MetricsDataPtr = std::shared_ptr<MetricsData>;
-
-class MetricsData {
-public:
-  absl::flat_hash_map<int, Stats::Counter*> counters;
-  int currentId;
-  Stats::ScopeSharedPtr scope_;
-  Stats::StatNamePool stat_name_pool_;
-  Stats::StatName custom_stat_namespace_;
-
-  static void init(Stats::ScopeSharedPtr scope) {
-    if (singleton_ == nullptr) {
-      singleton_ = std::make_shared<MetricsData>(scope);
-    }
-  }
-  static MetricsDataPtr get() {
-    return singleton_;
-  }
-
-protected:
-  static MetricsDataPtr singleton_;
-public:  
-  MetricsData(Stats::ScopeSharedPtr scope):
-    scope_(scope), stat_name_pool_(scope_->symbolTable()),
-    custom_stat_namespace_(stat_name_pool_.add(CustomStatNamespace)) {
-  }
-};
-
-class Metrics : public Filters::Common::Lua::BaseLuaObject<Metrics> {
-public:
-
-  Metrics(): metricsData(MetricsData::get()) {
-  }
-
-  MetricsDataPtr metricsData;
-  static ExportedFunctions exportedFunctions() {
-    return {
-        {"counterMetric", static_counterMetric},
-        {"incrementMetric", static_incrementMetric}};
-  }
-
-//KS: funkcje które będą dostępne w skryptach LUA, trzeba je jeszcze zarejestrować
-private:
-  /**
-   * Increment given metric
-   * @param 1 (int32): id of the metric
-   */
-  DECLARE_LUA_FUNCTION(Metrics, incrementMetric);
-  /**
-   * Create counter metric
-   * @param 1 (string): the name of the metric
-   * @return metric id (int32)
-   */
-  DECLARE_LUA_FUNCTION(Metrics, counterMetric);
-};
 
 class PerLuaCodeSetup : Logger::Loggable<Logger::Id::lua> {
 public:
@@ -366,7 +310,7 @@ private:
     stream_info_wrapper_.reset();
     connection_wrapper_.reset();
     public_key_wrapper_.reset();
-    metrics_.reset();
+    metrics_wrapper_.reset();
   }
 
   // Http::AsyncClient::Callbacks
@@ -390,7 +334,7 @@ private:
   Filters::Common::Lua::LuaDeathRef<StreamInfoWrapper> stream_info_wrapper_;
   Filters::Common::Lua::LuaDeathRef<Filters::Common::Lua::ConnectionWrapper> connection_wrapper_;
   Filters::Common::Lua::LuaDeathRef<PublicKeyWrapper> public_key_wrapper_;
-  Filters::Common::Lua::LuaDeathRef<Metrics> metrics_;
+  Filters::Common::Lua::LuaDeathRef<MetricsWrapper> metrics_wrapper_;
   State state_{State::Running};
   std::function<void()> yield_callback_;
   Http::AsyncClient::Request* http_request_{};
@@ -418,7 +362,7 @@ class FilterConfig : Logger::Loggable<Logger::Id::lua> {
 public:
   FilterConfig(const envoy::extensions::filters::http::lua::v3::Lua& proto_config,
                ThreadLocal::SlotAllocator& tls, Upstream::ClusterManager& cluster_manager,
-               Api::Api& api, Stats::ScopeSharedPtr scope);
+               Api::Api& api);
 
   PerLuaCodeSetup* perLuaCodeSetup(const std::string& name) const {
     const auto iter = per_lua_code_setups_map_.find(name);
@@ -631,6 +575,125 @@ private:
   // seems like a safer fix for now.
   Filters::Common::Lua::CoroutinePtr request_coroutine_;
   Filters::Common::Lua::CoroutinePtr response_coroutine_;
+};
+
+class Metrics;
+
+using MetricsPtr = std::shared_ptr<Metrics>;
+
+class Metrics : Logger::Loggable<Logger::Id::lua> {
+public:
+
+  enum Type {
+    COUNTER, GAUGE
+  };
+  static constexpr std::array TYPES_STRING = {"AAA", "BBB", "CCC" };
+
+  static void init(Stats::ScopeSharedPtr scope) {
+    singleton_ = std::make_shared<Metrics>(scope);
+  }
+
+  static MetricsPtr get() {
+    return singleton_;
+  }
+
+  static void reset() {
+    singleton_.reset();
+  }
+
+private:
+  static MetricsPtr singleton_;
+public:
+  Metrics(Stats::ScopeSharedPtr scope);
+
+  void add(uint64_t id, uint64_t value, Type type);
+  void sub(uint64_t id, uint64_t value, Type type);
+  void set(uint64_t id, uint64_t value, Type type);
+  uint64_t counter(absl::string_view name);
+  uint64_t gauge(absl::string_view name);
+
+private:
+  std::mutex define_mutex_;
+  absl::flat_hash_map<absl::string_view, uint64_t> name_to_id_;
+  absl::flat_hash_map<uint64_t, Stats::Metric*> metrics_;
+  Stats::ScopeSharedPtr scope_;
+  Stats::StatNamePool stat_name_pool_;
+  Stats::StatName custom_stat_namespace_;
+  uint64_t current_id_;
+};
+
+template<typename OStream>
+OStream &operator<<(OStream &os, const Metrics::Type &c)
+{
+  return os << Metrics::TYPES_STRING[c];
+}
+
+class MetricsWrapper : public Filters::Common::Lua::BaseLuaObject<MetricsWrapper> {
+public:
+
+  MetricsWrapper(MetricsPtr metrics): metrics(metrics) {
+  }
+
+  MetricsPtr metrics;
+  static ExportedFunctions exportedFunctions() {
+    return {
+        {"counter", static_luaCounter},
+        {"gauge", static_luaGauge},
+        {"inc", static_luaIncrement},
+        {"add", static_luaAdd},
+        {"dec", static_luaDecrement},
+        {"sub", static_luaSub},
+        {"set", static_luaSet}};
+  }
+
+private:
+  /**
+   * Increment given metric
+   * @param 1 (uint64): id of the metric
+   * @param 2 (MetricType) type of the metric
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaIncrement);
+  /**
+   * Create counter metric
+   * @param 1 (string): the name of the metric
+   * @return metric id (uint64)
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaCounter);
+  /**
+   * Create counter metric
+   * @param 1 (string): the name of the metric
+   * @return metric id (uint64)
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaGauge);
+  /**
+   * Add value to the metric
+   * @param 1 (uint64): id of the metric
+   * @param 2 (uint64): value to add
+   * @param 3 (MetricType): type of the metric
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaAdd);
+  /**
+   * Decrement given metric
+   * @param 1 (uint64): id of the metric
+   * @param 2 (MetricType) type of the metric
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaDecrement);
+  /**
+   * Subtract value from the metric
+   * @param 1 (uint64): id of the metric
+   * @param 2 (uint64): value to subtract
+   * @param 3 (MetricType): type of the metric
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaSub);
+  /**
+   * Set value to the metric
+   * @param 1 (uint64): id of the metric
+   * @param 2 (uint64): value to subtract
+   * @param 3 (MetricType): type of the metric
+   */
+  DECLARE_LUA_FUNCTION(MetricsWrapper, luaSet);
+
+  int add(uint64_t id, uint64_t value);
 };
 
 } // namespace Lua

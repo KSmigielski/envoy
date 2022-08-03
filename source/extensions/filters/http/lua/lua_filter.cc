@@ -119,9 +119,6 @@ Http::AsyncClient::Request* makeHttpCall(lua_State* state, Filter& filter,
 
 } // namespace
 
-
-MetricsDataPtr MetricsData::singleton_ = nullptr;
-
 PerLuaCodeSetup::PerLuaCodeSetup(const std::string& lua_code, ThreadLocal::SlotAllocator& tls)
     : lua_state_(lua_code, tls) {
   lua_state_.registerType<Filters::Common::Lua::BufferWrapper>();
@@ -136,17 +133,24 @@ PerLuaCodeSetup::PerLuaCodeSetup(const std::string& lua_code, ThreadLocal::SlotA
   lua_state_.registerType<DynamicMetadataMapIterator>();
   lua_state_.registerType<StreamHandleWrapper>();
   lua_state_.registerType<PublicKeyWrapper>();
-  lua_state_.registerType<Metrics>();
+  lua_state_.registerType<MetricsWrapper>();
 
   const Filters::Common::Lua::InitializerList initializers(
-      // EnvoyTimestampResolution "enum".
       {
-          [](lua_State* state) {
-            lua_newtable(state);
-            { LUA_ENUM(state, MILLISECOND, Timestamp::Resolution::Millisecond); }
-            lua_setglobal(state, "EnvoyTimestampResolution");
-          },
-          // Add more initializers here.
+        // EnvoyTimestampResolution "enum".
+        [](lua_State* state) {
+          lua_newtable(state);
+          { LUA_ENUM(state, MILLISECOND, Timestamp::Resolution::Millisecond); }
+          lua_setglobal(state, "EnvoyTimestampResolution");
+        },
+        // MetricType "enum"
+        [](lua_State* state) {
+          lua_newtable(state);
+          LUA_ENUM(state, COUNTER, Metrics::Type::COUNTER);
+          LUA_ENUM(state, GAUGE, Metrics::Type::GAUGE);
+          lua_setglobal(state, "MetricType");
+        }
+        // Add more initializers here.
       });
 
   request_function_slot_ = lua_state_.registerGlobal("envoy_on_request", initializers);
@@ -526,11 +530,11 @@ int StreamHandleWrapper::luaConnection(lua_State* state) {
 
 int StreamHandleWrapper::luaMetrics(lua_State* state) {
   ASSERT(state_ == State::Running);
-  if (metrics_.get() != nullptr) {
-    metrics_.pushStack();
+  if (metrics_wrapper_.get() != nullptr) {
+    metrics_wrapper_.pushStack();
   } else {
-    metrics_.reset(
-        Metrics::create(state), true);
+    metrics_wrapper_.reset(
+        MetricsWrapper::create(state, Metrics::get()), true);
   }
   return 1;
 }
@@ -661,32 +665,10 @@ int StreamHandleWrapper::luaTimestamp(lua_State* state) {
   return 1;
 }
 
-//KS: zwiekszanie metryki
-int Metrics::incrementMetric(lua_State* state) {
-  int id = luaL_checknumber(state, 2);
-  Stats::Counter* counter = metricsData->counters[id];
-  counter->inc();
-  return 0;
-}
-
-//KS: definiowanie metryki
-int Metrics::counterMetric(lua_State* state) {
-  absl::string_view metric_name = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
-  ENVOY_LOG(debug, "ks -> {}", metric_name);
-  Stats::StatNameManagedStorage storage(metric_name, metricsData->scope_->symbolTable());
-  Stats::StatName stat_name = storage.statName();
-  int id = metricsData->currentId++;
-  Stats::Counter* c = &Stats::Utility::counterFromElements(*metricsData->scope_, {metricsData->custom_stat_namespace_, stat_name});
-  metricsData->counters[id] = c;
-  lua_pushnumber(state, id);
-  return 1;
-}
-
 FilterConfig::FilterConfig(const envoy::extensions::filters::http::lua::v3::Lua& proto_config,
                            ThreadLocal::SlotAllocator& tls,
-                           Upstream::ClusterManager& cluster_manager, Api::Api& api, Stats::ScopeSharedPtr scope)
+                           Upstream::ClusterManager& cluster_manager, Api::Api& api)
     : cluster_manager_(cluster_manager) {
-  MetricsData::init(scope);
   auto global_setup_ptr = std::make_unique<PerLuaCodeSetup>(proto_config.inline_code(), tls);
   if (global_setup_ptr) {
     per_lua_code_setups_map_[GLOBAL_SCRIPT_NAME] = std::move(global_setup_ptr);
@@ -838,6 +820,122 @@ void Filter::EncoderCallbacks::respond(Http::ResponseHeaderMapPtr&&, Buffer::Ins
 const ProtobufWkt::Struct& Filter::EncoderCallbacks::metadata() const {
   return getMetadata(callbacks_);
 }
+
+int MetricsWrapper::luaAdd(lua_State* state) {
+  uint64_t id = luaL_checknumber(state, 2);
+  uint64_t value = luaL_checknumber(state, 3);
+  Metrics::Type type = static_cast<Metrics::Type>(luaL_checknumber(state, 4));
+  metrics->add(id, value, type);
+  return 0;
+}
+
+int MetricsWrapper::luaIncrement(lua_State* state) {
+  uint64_t id = luaL_checknumber(state, 2);
+  Metrics::Type type = static_cast<Metrics::Type>(luaL_checknumber(state, 3));
+  metrics->add(id, 1, type);
+  return 0;
+}
+
+int MetricsWrapper::luaCounter(lua_State* state) {
+  absl::string_view metric_name = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
+  uint64_t id = metrics->counter(metric_name);
+  lua_pushnumber(state, id);
+  return 1;
+}
+
+int MetricsWrapper::luaGauge(lua_State* state) {
+  absl::string_view metric_name = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
+  uint64_t id = metrics->gauge(metric_name);
+  lua_pushnumber(state, id);
+  return 1;
+}
+
+
+int MetricsWrapper::luaSub(lua_State* state) {
+  uint64_t id = luaL_checknumber(state, 2);
+  Metrics::Type type = static_cast<Metrics::Type>(luaL_checknumber(state, 3));
+  metrics->sub(id, 1, type);
+  return 0;
+}
+
+int MetricsWrapper::luaDecrement(lua_State* state) {
+  uint64_t id = luaL_checknumber(state, 2);
+  uint64_t value = luaL_checknumber(state, 3);
+  Metrics::Type type = static_cast<Metrics::Type>(luaL_checknumber(state, 4));
+  metrics->sub(id, value, type);
+  return 0;
+}
+
+int MetricsWrapper::luaSet(lua_State* state) {
+  uint64_t id = luaL_checknumber(state, 2);
+  uint64_t value = luaL_checknumber(state, 3);
+  Metrics::Type type = static_cast<Metrics::Type>(luaL_checknumber(state, 4));
+  metrics->set(id, value, type);
+  return 0;
+
+}
+
+Metrics::Metrics(Stats::ScopeSharedPtr scope):
+                                                scope_(scope), stat_name_pool_(scope_->symbolTable()),
+                                                custom_stat_namespace_(stat_name_pool_.add(CustomStatNamespace)), current_id_(0) {
+}
+
+void Metrics::add(uint64_t id, uint64_t value, Type type) {
+  Stats::Metric* metric = metrics_[id];
+  if (type == Type::COUNTER) {
+    static_cast<Stats::Counter*>(metric)->add(value);
+  } else if (type == Type::GAUGE) {
+    static_cast<Stats::Gauge*>(metric)->add(value);
+  } else {
+    ENVOY_LOG(warn, "add function is not supported for metric type {}", type);
+  }
+}
+
+void Metrics::sub(uint64_t id, uint64_t value, Type type) {
+  Stats::Metric* metric = metrics_[id];
+  if (type == Type::GAUGE) {
+    static_cast<Stats::Gauge*>(metric)->sub(value);
+  } else {
+    ENVOY_LOG(warn, "sub function is not supported for metric type {}", type);
+  }
+}
+
+void Metrics::set(uint64_t id, uint64_t value, Type type) {
+  Stats::Metric* metric = metrics_[id];
+  if (type == Type::GAUGE) {
+    static_cast<Stats::Gauge*>(metric)->set(value);
+  } else {
+    ENVOY_LOG(warn, "set function is not supported fot metric type {}", type);
+  }
+}
+
+uint64_t Metrics::counter(absl::string_view name) {
+  std::lock_guard lock(define_mutex_);
+  if (name_to_id_.contains(name)) {
+    return name_to_id_[name];
+  }
+  Stats::StatNameManagedStorage storage(name, scope_->symbolTable());
+  Stats::StatName stat_name = storage.statName();
+  uint64_t id = current_id_++;
+  Stats::Metric* c = &Stats::Utility::counterFromStatNames(*scope_, {custom_stat_namespace_, stat_name});
+  metrics_[id] = c;
+  return id;
+}
+
+uint64_t Metrics::gauge(absl::string_view name) {
+  std::lock_guard lock(define_mutex_);
+  if (name_to_id_.contains(name)) {
+    return name_to_id_[name];
+  }
+  Stats::StatNameManagedStorage storage(name, scope_->symbolTable());
+  Stats::StatName stat_name = storage.statName();
+  uint64_t id = current_id_++;
+  Stats::Metric* c = &Stats::Utility::gaugeFromStatNames(*scope_, {custom_stat_namespace_, stat_name}, Stats::Gauge::ImportMode::NeverImport);
+  metrics_[id] = c;
+  return id;
+}
+
+MetricsPtr Metrics::singleton_ = nullptr;
 
 } // namespace Lua
 } // namespace HttpFilters
