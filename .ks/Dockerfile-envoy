@@ -1,0 +1,7 @@
+FROM envoyproxy/envoy-dev:b67a3fc250cd9f74fde744d400d7c6857ea80dea
+ADD ./lib/mylibrary.lua /lib/mylibrary.lua
+COPY ./envoy/envoy.yaml /etc/envoy.yaml
+RUN chmod go+r /etc/envoy.yaml /lib/mylibrary.lua
+COPY ./envoy/envoy-static /usr/local/bin/envoy
+RUN chmod 555 /usr/local/bin/envoy
+CMD ["/usr/local/bin/envoy", "-c", "/etc/envoy.yaml", "-l", "debug", "--service-cluster", "proxy"]

@@ -531,6 +531,15 @@ Default resolution is millisecond if *resolution* is not set.
 
 .. _config_http_filters_lua_header_wrapper:
 
+metrics()
+^^^^^^^^^
+
+.. code-block:: lua
+
+  local metrics = handle:metrics()
+
+Returns a :ref:`metrics object <config_http_filters_lua_metrics_wrapper>`.
+
 Header object API
 -----------------
 
@@ -1022,3 +1031,32 @@ tlsVersion()
   downstreamSslConnection:tlsVersion()
 
 Returns the TLS version (e.g., TLSv1.2, TLSv1.3) used in the established TLS connection.
+
+Metrics object API
+------------------
+
+counter()
+^^^^^^^^^
+
+.. code-block:: lua
+  counter_id = metrics:counter(name)
+
+Returns ``id`` of created counter. It will be used to interact with created metric. Argument ``name`` is
+mandatory which is used to create metric name.
+
+inc()
+^^^^^
+
+.. code-block:: lua
+  metrics:inc(id)
+
+Increment metric by 1. Argument ``id`` is mandatory and should be have value returned from ``counter`` function.
+
+add()
+^^^^^
+
+.. code-block:: lua
+  metrics:add(id, value)
+
+Increment metric by ``value``. Argument ``id`` is mandatory and should be have value returned from ``counter`` function.
+Argument ``value`` is mandatory and should be positive integer.
