@@ -1,7 +1,7 @@
-date: June 30, 2024
+date: August 30, 2024
 
-bug_fixes:
-- area: http
-  change: |
-    Fixed a bug where additional :ref:`cookie attributes <envoy_v3_api_msg_config.route.v3.RouteAction.HashPolicy.cookie>`
-    are not sent properly to clients.
+new_features:
+  - area: jwt_authn
+    change: |
+      Added missing implementation to jwt_authn matchers to allow glob pattern matching.
+
