@@ -1715,7 +1715,7 @@ zstandard==0.23.0 \
     # via envoy-base-utils
 
 # The following packages are considered to be unsafe in a requirements file:
-setuptools==74.0.0 \
-    --hash=sha256:0274581a0037b638b9fc1c6883cc71c0210865aaa76073f7882376b641b84e8f \
-    --hash=sha256:a85e96b8be2b906f3e3e789adec6a9323abf79758ecfa3065bd740d81158b11e
+setuptools==75.0.0 \
+    --hash=sha256:25af69c809d9334cd8e653d385277abeb5a102dca255954005a7092d282575ea \
+    --hash=sha256:791ae94f04f78c880b5e614e560dd32d4b4af5d151bd9e7483e3377846caf90a
     # via -r requirements.in
